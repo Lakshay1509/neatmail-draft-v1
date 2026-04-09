@@ -28,6 +28,21 @@ settings = get_settings()
 
 _PAGE_SIZE = 50   # Graph API $top limit (max 1000, keep lower for memory)
 
+
+def _escape_odata_string(value: str) -> str:
+    """Escape single quotes for OData string literals."""
+    return value.replace("'", "''")
+
+
+def _message_has_recipient(item: dict, sender_email: str) -> bool:
+    """Return True when sender_email appears in toRecipients."""
+    target = (sender_email or "").strip().lower()
+    for recipient in item.get("toRecipients", []):
+        addr = recipient.get("emailAddress", {}).get("address", "")
+        if addr.strip().lower() == target:
+            return True
+    return False
+
 def _strip_quoted_reply(text: str) -> str:
     import re
     text = re.sub(r"\n>.*", "", text, flags=re.DOTALL)
@@ -77,7 +92,13 @@ class OutlookProvider(BaseEmailProvider):
         sender_email: str,
         since_ts: int,
     ) -> List[EmailMessage]:
-        since_iso = datetime.fromtimestamp(since_ts, tz=timezone.utc).isoformat()
+        # Graph examples use a UTC literal with trailing Z in OData filters.
+        since_iso = (
+            datetime
+            .fromtimestamp(since_ts, tz=timezone.utc)
+            .isoformat(timespec="seconds")
+            .replace("+00:00", "Z")
+        )
 
         received = await self._fetch_messages(sender_email, since_iso, folder="inbox")
         sent     = await self._fetch_messages(sender_email, since_iso, folder="sentitems")
@@ -94,19 +115,24 @@ class OutlookProvider(BaseEmailProvider):
         if not thread_id:
             return []
 
-        url = (
-            f"{self._base}/me/messages"
-            f"?$filter=conversationId eq '{thread_id}'"
-            f"&$select=id,subject,body,receivedDateTime,from,toRecipients"
-            f"&$orderby=receivedDateTime desc"
-            f"&$top=3"
-        )
+        url = f"{self._base}/me/messages"
+        params = {
+            "$filter": f"conversationId eq '{_escape_odata_string(thread_id)}'",
+            "$select": "id,subject,body,receivedDateTime,from,toRecipients",
+            "$orderby": "receivedDateTime desc",
+            "$top": 3,
+        }
 
         messages = []
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(url, headers=self._headers)
+            resp = await client.get(url, headers=self._headers, params=params)
             if resp.status_code != 200:
-                logger.warning(f"Outlook: failed to fetch thread {thread_id}")
+                logger.warning(
+                    "Outlook: failed to fetch thread %s [status=%s, detail=%s]",
+                    thread_id,
+                    resp.status_code,
+                    (resp.text or "")[:300],
+                )
                 return []
 
             data = resp.json()
@@ -135,36 +161,45 @@ class OutlookProvider(BaseEmailProvider):
         """
         Fetch messages from a specific folder.
         - inbox   → filter by from address
-        - sentitems → filter by recipient address
+        - sentitems → filter by date (recipient filtering is done client-side)
         """
+        sender_email_escaped = _escape_odata_string(sender_email)
+
         if folder == "inbox":
             odata_filter = (
-                f"from/emailAddress/address eq '{sender_email}' "
+                f"from/emailAddress/address eq '{sender_email_escaped}' "
                 f"and receivedDateTime ge {since_iso}"
             )
         else:
-            odata_filter = (
-                f"toRecipients/any(r:r/emailAddress/address eq '{sender_email}') "
-                f"and receivedDateTime ge {since_iso}"
-            )
+            # Graph can reject toRecipients/any(...) in this endpoint on some tenants.
+            # Keep server-side date filtering and apply recipient filtering locally.
+            odata_filter = f"receivedDateTime ge {since_iso}"
 
         select_fields = "id,subject,body,receivedDateTime,from,toRecipients"
-        url = (
-            f"{self._base}/me/mailFolders/{folder}/messages"
-            f"?$filter={odata_filter}"
-            f"&$select={select_fields}"
-            f"&$top={_PAGE_SIZE}"
-        )
+        url = f"{self._base}/me/mailFolders/{folder}/messages"
+        params = {
+            "$filter": odata_filter,
+            "$select": select_fields,
+            "$top": _PAGE_SIZE,
+        }
 
         messages: List[EmailMessage] = []
 
         async with httpx.AsyncClient(timeout=30) as client:
             while url:
-                resp = await client.get(url, headers=self._headers)
+                if params is not None:
+                    resp = await client.get(url, headers=self._headers, params=params)
+                    params = None
+                else:
+                    # @odata.nextLink already contains encoded query params.
+                    resp = await client.get(url, headers=self._headers)
                 resp.raise_for_status()
                 data = resp.json()
 
                 for item in data.get("value", []):
+                    if folder == "sentitems" and not _message_has_recipient(item, sender_email):
+                        continue
+
                     msg = self._parse_message(item, sender_email, folder)
                     if msg:
                         messages.append(msg)
