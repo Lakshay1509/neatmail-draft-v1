@@ -15,6 +15,7 @@ from __future__ import annotations
 import time
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional
+from urllib.parse import quote, unquote
 
 import httpx
 
@@ -34,6 +35,12 @@ def _escape_odata_string(value: str) -> str:
     return value.replace("'", "''")
 
 
+def _normalize_graph_id(value: str) -> str:
+    """Trim and decode percent-encoded Graph IDs when needed."""
+    cleaned = (value or "").strip()
+    return unquote(cleaned) if "%" in cleaned else cleaned
+
+
 def _message_has_recipient(item: dict, sender_email: str) -> bool:
     """Return True when sender_email appears in toRecipients."""
     target = (sender_email or "").strip().lower()
@@ -42,6 +49,7 @@ def _message_has_recipient(item: dict, sender_email: str) -> bool:
         if addr.strip().lower() == target:
             return True
     return False
+
 
 def _strip_quoted_reply(text: str) -> str:
     import re
@@ -64,7 +72,7 @@ def _parse_graph_datetime(dt_str: str) -> int:
 def _extract_body_graph(body: dict) -> str:
     """Extract plain text from a Graph message body object."""
     content_type = body.get("contentType", "text")
-    content      = body.get("content", "")
+    content = body.get("content", "")
     if content_type == "html":
         # Lightweight HTML stripping — no dependency required
         import re
@@ -79,7 +87,7 @@ class OutlookProvider(BaseEmailProvider):
 
     def __init__(self, token: str, user_id: str) -> None:
         super().__init__(token, user_id)
-        self._base    = settings.graph_api_base
+        self._base = settings.graph_api_base
         self._headers = {
             "Authorization": f"Bearer {token}",
             "Accept":        "application/json",
@@ -101,7 +109,7 @@ class OutlookProvider(BaseEmailProvider):
         )
 
         received = await self._fetch_messages(sender_email, since_iso, folder="inbox")
-        sent     = await self._fetch_messages(sender_email, since_iso, folder="sentitems")
+        sent = await self._fetch_messages(sender_email, since_iso, folder="sentitems")
 
         all_messages = received + sent
         logger.info(
@@ -112,43 +120,118 @@ class OutlookProvider(BaseEmailProvider):
 
     async def fetch_thread_context(self, thread_id: str) -> list[dict]:
         """Fetch the last 3 messages as structured dicts."""
+        thread_id = _normalize_graph_id(thread_id)
         if not thread_id:
             return []
 
-        url = f"{self._base}/me/messages"
-        params = {
-            "$filter": f"conversationId eq '{_escape_odata_string(thread_id)}'",
-            "$select": "id,subject,body,receivedDateTime,from,toRecipients",
-            "$orderby": "receivedDateTime desc",
-            "$top": 3,
-        }
+        logger.info(
+            "Outlook: fetch_thread_context [thread_id_len=%s]", len(thread_id))
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            items = await self._fetch_thread_items_by_conversation_id(client, thread_id)
+
+            # Some callers accidentally send a message id instead of conversationId.
+            if not items:
+                resolved_conversation_id = await self._resolve_conversation_id(client, thread_id)
+                if resolved_conversation_id:
+                    logger.info(
+                        "Outlook: resolved thread id to conversationId [len=%s]",
+                        len(resolved_conversation_id),
+                    )
+                    items = await self._fetch_thread_items_by_conversation_id(
+                        client,
+                        resolved_conversation_id,
+                    )
 
         messages = []
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(url, headers=self._headers, params=params)
-            if resp.status_code != 200:
-                logger.warning(
-                    "Outlook: failed to fetch thread %s [status=%s, detail=%s]",
-                    thread_id,
-                    resp.status_code,
-                    (resp.text or "")[:300],
-                )
-                return []
-
-            data = resp.json()
-            for item in data.get("value", []):
-                body = _strip_quoted_reply(_extract_body_graph(item.get("body", {})))
-                from_dict = item.get("from", {}).get("emailAddress", {})
-                from_addr = f"{from_dict.get('name', '')} <{from_dict.get('address', '')}>".strip()
-                messages.append({
-                    "from": from_addr,
-                    "date": item.get("receivedDateTime", ""),
-                    "body": body,
-                })
+        for item in items:
+            body = _strip_quoted_reply(
+                _extract_body_graph(item.get("body", {})))
+            from_dict = item.get("from", {}).get("emailAddress", {})
+            from_addr = f"{from_dict.get('name', '')} <{from_dict.get('address', '')}>".strip(
+            )
+            messages.append({
+                "from": from_addr,
+                "date": item.get("receivedDateTime", ""),
+                "body": body,
+            })
 
         messages.reverse()  # chronological order
         return messages
 
+    async def _fetch_thread_items_by_conversation_id(
+        self,
+        client: httpx.AsyncClient,
+        conversation_id: str,
+    ) -> list[dict]:
+        url = f"{self._base}/me/messages"
+        params = {
+            "$filter": f"conversationId eq '{_escape_odata_string(conversation_id)}'",
+            "$select": "id,subject,body,receivedDateTime,from,toRecipients",
+            "$orderby": "receivedDateTime desc",
+            "$top": 5,
+        }
+
+        resp = await client.get(url, headers=self._headers, params=params)
+        if resp.status_code != 200:
+            logger.warning(
+                "Outlook: failed to fetch thread [status=%s, detail=%s]",
+                resp.status_code,
+                (resp.text or "")[:300],
+            )
+            return []
+
+        data = resp.json()
+        items = data.get("value", [])
+        # Avoid server-side sort here. Some tenants reject conversationId filter + orderby
+        # with InefficientFilter. Sort locally and keep the latest 3.
+        items.sort(key=lambda m: m.get("receivedDateTime", ""), reverse=True)
+        items = items[:3]
+        logger.info(
+            "Outlook: thread query completed [matched=%s]",
+            len(items),
+        )
+        return items
+
+    async def _resolve_conversation_id(
+        self,
+        client: httpx.AsyncClient,
+        candidate_id: str,
+    ) -> Optional[str]:
+        """Try resolving candidate_id as message id to recover its conversationId."""
+        # Fast path: treat candidate as Graph message id.
+        encoded_id = quote(candidate_id, safe="")
+        url = f"{self._base}/me/messages/{encoded_id}"
+        params = {"$select": "conversationId"}
+
+        resp = await client.get(url, headers=self._headers, params=params)
+        if resp.status_code == 200:
+            resolved = (resp.json().get("conversationId") or "").strip()
+            if resolved:
+                return resolved
+
+        # Fallback: treat candidate as RFC internetMessageId.
+        url = f"{self._base}/me/messages"
+        params = {
+            "$filter": f"internetMessageId eq '{_escape_odata_string(candidate_id)}'",
+            "$select": "id,conversationId",
+            "$top": 1,
+        }
+
+        resp = await client.get(url, headers=self._headers, params=params)
+        if resp.status_code != 200:
+            logger.info(
+                "Outlook: message-id fallback query failed [status=%s]",
+                resp.status_code,
+            )
+            return None
+
+        items = resp.json().get("value", [])
+        if not items:
+            return None
+
+        resolved = (items[0].get("conversationId") or "").strip()
+        return resolved or None
 
     # ── Private helpers ───────────────────────────────────────────────────
 
@@ -215,17 +298,17 @@ class OutlookProvider(BaseEmailProvider):
         folder: str,
     ) -> Optional[EmailMessage]:
         try:
-            subject   = item.get("subject") or "(no subject)"
-            body      = _extract_body_graph(item.get("body", {}))
+            subject = item.get("subject") or "(no subject)"
+            body = _extract_body_graph(item.get("body", {}))
             timestamp = _parse_graph_datetime(item.get("receivedDateTime", ""))
             is_incoming = folder == "inbox"
 
             return EmailMessage(
-                message_id  = item["id"],
-                subject     = subject,
-                body        = body,
-                timestamp   = timestamp,
-                is_incoming = is_incoming,
+                message_id=item["id"],
+                subject=subject,
+                body=body,
+                timestamp=timestamp,
+                is_incoming=is_incoming,
             )
         except Exception as exc:
             logger.warning(f"Outlook: failed to parse message: {exc}")

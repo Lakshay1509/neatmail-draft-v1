@@ -7,7 +7,7 @@ so the rest of the codebase stays provider-agnostic.
 
 from __future__ import annotations
 from abc import ABC, abstractmethod
-from typing import List
+from typing import Any, List
 from models import EmailMessage
 
 
@@ -28,6 +28,6 @@ class BaseEmailProvider(ABC):
         ...
 
     @abstractmethod
-    async def fetch_thread_context(self, thread_id: str) -> str:
+    async def fetch_thread_context(self, thread_id: str) -> list[dict[str, Any]]:
         """Fetch the thread text by thread ID/conversation ID."""
         ...

@@ -28,6 +28,14 @@ class ContextRequest(BaseModel):
     def sender_email_lowercase(cls, v: str) -> str:
         return v.strip().lower()
 
+    @field_validator("threadId")
+    @classmethod
+    def normalize_thread_id(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        cleaned = v.strip()
+        return cleaned or None
+
 
 class EmailMessage(BaseModel):
     """Normalised email message from any provider."""
