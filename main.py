@@ -11,9 +11,10 @@ from __future__ import annotations
 import httpx
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import FastAPI, HTTPException, Request, status, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.security import APIKeyHeader
 
 from config import get_settings
 from models import ContextRequest, ContextResponse
@@ -45,10 +46,20 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins  = ["*"],   # tighten in production
+    allow_origins  = ["https://dashboard.neatmail.app"],
     allow_methods  = ["POST", "GET"],
     allow_headers  = ["*"],
 )
+
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=True)
+
+def verify_api_key(api_key: str = Depends(api_key_header)):
+    if api_key != settings.dashboard_api_key:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid API Key",
+        )
+    return api_key
 
 # Singleton engine — shared across all requests
 _engine = ContextEngine()
@@ -79,6 +90,7 @@ async def health():
     status_code    = status.HTTP_200_OK,
     tags           = ["Context"],
     summary        = "Get semantic context for an incoming email",
+    dependencies   = [Depends(verify_api_key)],
 )
 async def get_context(req: ContextRequest) -> ContextResponse:
     """

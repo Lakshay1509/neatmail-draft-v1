@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     # ── App ──────────────────────────────────────────────────────────────────
     log_level: str = "INFO"
     app_env: str = "production"
+    dashboard_api_key: str  # Secret key required for X-API-Key header
 
 
 @lru_cache(maxsize=1)
