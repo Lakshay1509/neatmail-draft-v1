@@ -127,8 +127,8 @@ class ContextEngine:
         prompt = f"""Extract metadata from the following email body.
 Output strictly JSON conforming to this schema (no other keys):
 {{
-  "intent": "<one of: [scheduling_request, task_assignment, question, follow_up, general] — from email body only>",
-  "keywords": ["<up to 3 keywords from email body, or empty array>"],
+  "intent": "<one of: [scheduling_request, meeting_confirmation, task_assignment, status_update, question, approval, follow_up, introduction, complaint, general] — from email body only>",
+  "keywords": ["<up to 5 keywords from email body, or empty array>"],
   "mentionedDates": [
     {{"raw": "<exact text>", "iso": "<ISO-8601 with {timezone_str} offset>"}}
   ]
