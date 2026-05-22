@@ -211,11 +211,11 @@ Email Body:
         sorted_matches = sorted(matches, key=lambda s: s.get("timestamp", 0), reverse=True)
         history = []
         for m in sorted_matches:
-            ts   = m.get("timestamp", 0)
+            ts = m.get("timestamp", 0)
             date = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%b %d") if ts else "?"
-            sender = m.get("sender_email", "unknown")
+            is_incoming = m.get("is_incoming", True)
             history.append({
-                "from": sender,
+                "from": m.get("sender_email", "unknown") if is_incoming else "you",
                 "date": date,
                 "body": m.get("text", "").strip(),
             })
