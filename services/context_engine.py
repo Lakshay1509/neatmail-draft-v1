@@ -99,7 +99,11 @@ class ContextEngine:
         )
 
         # ── Step 5: Build retrieved_history from raw matches ────────────────
-        retrieved_history = self._build_retrieved_history(matches)
+        retrieved_history = self._build_retrieved_history(matches, req.user_name or req.user_id)
+
+        # ── Deduplicate thread_context against retrieved_history ───────────
+        if thread_context:
+            thread_context = self._deduplicate_thread_context(thread_context, retrieved_history)
 
         # ── Wait for metadata extraction ──────────────────────────────────
         metadata = await metadata_task
@@ -206,7 +210,7 @@ Email Body:
     # ── Private: build retrieved_history ────────────────────────────────
 
     @staticmethod
-    def _build_retrieved_history(matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _build_retrieved_history(matches: List[Dict[str, Any]], user_label: str) -> List[Dict[str, Any]]:
         """Convert raw Pinecone match metadata into the retrieved_history shape."""
         sorted_matches = sorted(matches, key=lambda s: s.get("timestamp", 0), reverse=True)
         history = []
@@ -215,11 +219,33 @@ Email Body:
             date = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%b %d") if ts else "?"
             is_incoming = m.get("is_incoming", True)
             history.append({
-                "from": m.get("sender_email", "unknown") if is_incoming else "you",
+                "from": m.get("sender_email", "unknown") if is_incoming else user_label,
                 "date": date,
                 "body": m.get("text", "").strip(),
             })
         return history
+
+    # ── Private: deduplicate thread_context ──────────────────────────────
+
+    @staticmethod
+    def _deduplicate_thread_context(
+        thread_context: list[dict], retrieved_history: list[dict]
+    ) -> list[dict]:
+        """Remove thread_context entries whose body already appears in retrieved_history."""
+        history_bodies = {h["body"].strip() for h in retrieved_history if h.get("body")}
+
+        deduped = []
+        for entry in thread_context:
+            body = (entry.get("body") or "").strip()
+            if not body:
+                continue
+            if body in history_bodies:
+                continue
+            if any(body in hb or hb in body for hb in history_bodies):
+                continue
+            deduped.append(entry)
+
+        return deduped
 
     # ── Utility ──────────────────────────────────────────────────────────
 

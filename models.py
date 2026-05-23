@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 class ContextRequest(BaseModel):
     user_id:      str
+    user_name:    Optional[str] = None  # Display name for outgoing chunks
     sender_email: str
     token:        str          # Gmail or Microsoft Graph OAuth token
     body:         str
