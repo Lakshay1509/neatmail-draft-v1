@@ -47,7 +47,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins  = ["https://dashboard.neatmail.app"],
-    allow_methods  = ["POST", "GET"],
+    allow_methods  = ["POST", "GET", "DELETE"],
     allow_headers  = ["*"],
 )
 
@@ -111,3 +111,24 @@ async def get_context(req: ContextRequest) -> ContextResponse:
             status_code = status.HTTP_502_BAD_GATEWAY,
             detail      = "Failed to reach email provider. Check your token and retry.",
         )
+
+
+@app.delete(
+    "/user/{user_id}",
+    status_code  = status.HTTP_200_OK,
+    tags         = ["User"],
+    summary      = "Delete all data for a user",
+    dependencies = [Depends(verify_api_key)],
+)
+async def delete_user(user_id: str):
+    """
+    Permanently deletes all indexed email data for the given user from
+    Pinecone. Requires a valid X-API-Key header.
+    """
+    deleted = await _engine.delete_user(user_id)
+    logger.info(f"Deleted {deleted} vectors for user_id={user_id}")
+    return {
+        "status":  "deleted",
+        "user_id": user_id,
+        "vectors_deleted": deleted,
+    }

@@ -249,6 +249,11 @@ Email Body:
 
     # ── Utility ──────────────────────────────────────────────────────────
 
+    async def delete_user(self, user_id: str) -> int:
+        """Delete all Pinecone data for a user. Returns count of deleted vectors."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _vector_store.delete_user, user_id)
+
     @staticmethod
     def _since_timestamp(days: int) -> int:
         """Return Unix epoch timestamp for *days* ago from now."""

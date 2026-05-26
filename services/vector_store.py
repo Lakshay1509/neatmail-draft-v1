@@ -172,3 +172,21 @@ class VectorStoreService:
             f"[user={user_id}, sender={sender_email}]"
         )
         return [m["metadata"] for m in matches if m.get("metadata")]
+
+    # ── Delete path ────────────────────────────────────────────────────────
+
+    def delete_user(self, user_id: str) -> int:
+        """
+        Delete all vectors for a given user from Pinecone.
+        Returns the number of vectors that existed before deletion.
+        """
+        stats = self._index.describe_index_stats()
+        before = (
+            stats.get("namespaces", {})
+            .get(user_id, {})
+            .get("vector_count", 0)
+        )
+        if before > 0:
+            self._index.delete(delete_all=True, namespace=user_id)
+            logger.info(f"VectorStore: deleted {before} vectors [user={user_id}]")
+        return before
