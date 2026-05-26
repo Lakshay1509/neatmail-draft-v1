@@ -68,6 +68,12 @@ def _extract_body(payload: dict) -> str:
     return ""
 
 
+def _extract_email_addr(from_header: str) -> str:
+    """Parse bare email from formats like 'Name <user@domain.com>' or 'user@domain.com'."""
+    match = re.search(r"<([^>]+)>", from_header)
+    return (match.group(1) if match else from_header).strip().lower()
+
+
 def _get_header(headers: list, name: str) -> str:
     name_lower = name.lower()
     for h in headers:
@@ -211,7 +217,7 @@ class GmailProvider(BaseEmailProvider):
         else:
             timestamp = int(time.time())
 
-        is_incoming = sender_email in from_addr
+        is_incoming = sender_email == _extract_email_addr(from_addr)
 
         return EmailMessage(
             message_id  = message_id,
