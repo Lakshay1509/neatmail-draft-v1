@@ -35,7 +35,7 @@ settings = get_settings()
 # ── Singleton services (reused across requests) ─────────────────────────────
 _embedder     = EmbedderService()
 _vector_store = VectorStoreService()
-_openai       = AsyncOpenAI(api_key=settings.azure_api_key, base_url=settings.azure_endpoint)
+_openai       = AsyncOpenAI(api_key=settings.openai_api_key)
 
 
 

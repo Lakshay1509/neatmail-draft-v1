@@ -29,7 +29,7 @@ class EmbedderService:
     """Thin async wrapper around the OpenAI Embeddings endpoint."""
 
     def __init__(self) -> None:
-        self._client = AsyncOpenAI(base_url=settings.azure_endpoint, api_key=settings.azure_api_key )
+        self._client = AsyncOpenAI(api_key=settings.openai_api_key)
 
         self._model  = settings.openai_embedding_model
         self._dims   = settings.openai_embedding_dimensions
